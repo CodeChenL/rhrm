@@ -1,7 +1,7 @@
 use eframe::egui;
 
-use super::float_window_controller::FloatWindowLayout;
 use crate::app_state::AppState;
+use super::float_window_controller::FloatWindowLayout;
 
 pub struct FloatWindowApp {
     state: AppState,
@@ -44,33 +44,38 @@ impl FloatWindowApp {
     }
 
     pub(crate) fn set_opacity(&mut self, opacity: f32) {
-        self.opacity = opacity.clamp(0.1, 1.0);
+        self.opacity = opacity.clamp(0.0, 1.0);
     }
 
-    pub(crate) fn show(&mut self, ctx: &egui::Context, layout: FloatWindowLayout) {
-        ctx.send_viewport_cmd_to(
-            egui::ViewportId::from_hash_of("float_window"),
-            egui::ViewportCommand::MousePassthrough(self.click_through),
-        );
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("float_window"),
-            egui::ViewportBuilder::default()
-                .with_title("HR Float")
-                .with_transparent(true)
-                .with_decorations(false)
-                .with_always_on_top()
-                .with_inner_size(egui::vec2(layout.width, layout.height))
-                .with_position(egui::pos2(layout.x as f32, layout.y as f32))
-                .with_resizable(true),
-            |ctx, _class| {
-                self.render_contents(ctx);
-            },
-        );
+    pub(crate) fn show_as_root(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.click_through));
+        self.render_contents(ctx);
+    }
+
+    pub(crate) fn show_as_root_with_layout(
+        &mut self,
+        ctx: &egui::Context,
+        layout: FloatWindowLayout,
+    ) {
+        self.apply_root_layout(ctx, layout);
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.click_through));
+        self.render_contents(ctx);
+    }
+
+    fn apply_root_layout(&self, ctx: &egui::Context, layout: FloatWindowLayout) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            layout.x as f32,
+            layout.y as f32,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            layout.width,
+            layout.height,
+        )));
     }
 
     fn render_contents(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
-        let background_alpha = (self.opacity * 160.0).round() as u8;
+        let background_alpha = (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         ctx.style_mut(|style| {
             style.visuals.panel_fill = egui::Color32::TRANSPARENT;
             style.visuals.window_fill = egui::Color32::TRANSPARENT;
@@ -88,11 +93,13 @@ impl FloatWindowApp {
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
-                ui.painter().rect_filled(
-                    panel_rect,
-                    8.0,
-                    egui::Color32::from_rgba_unmultiplied(15, 15, 20, background_alpha),
-                );
+                if background_alpha > 0 {
+                    ui.painter().rect_filled(
+                        panel_rect,
+                       0.0,
+                        egui::Color32::from_rgba_unmultiplied(15, 15, 20, background_alpha),
+                    );
+                }
 
                 let text = if let Some(heart_rate) = heart_rate {
                     format!("❤️ {} bpm", heart_rate)
@@ -139,10 +146,15 @@ impl FloatWindowApp {
                 }
             });
     }
+
 }
 
 impl eframe::App for FloatWindowApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.render_contents(ctx);
+        self.show_as_root(ctx);
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Rgba::TRANSPARENT.to_array()
     }
 }

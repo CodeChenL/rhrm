@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # GUI
-eframe = "0.33.3"
+eframe = { version = "0.33.3", features = ["glow"]}
 egui = "0.33.3"
 
 # CLI

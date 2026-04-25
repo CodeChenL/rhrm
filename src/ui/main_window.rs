@@ -8,34 +8,31 @@ use crate::bluetooth::BluetoothService;
 use super::float_window::FloatWindowApp;
 use super::float_window_controller::{FloatWindowController, FloatWindowLayout};
 
-const FLOAT_MIN_SIZE: f32 = 120.0;
-const FLOAT_MAX_SIZE: f32 = 600.0;
+const FLOAT_MIN_SIZE: f32 = 50.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FloatWindowPreset {
     TopLeft,
+    TopCenter,
     TopRight,
+    MiddleLeft,
+    MiddleRight,
     BottomLeft,
+    BottomCenter,
     BottomRight,
     Center,
 }
 
 impl FloatWindowPreset {
-    fn all() -> [Self; 5] {
-        [
-            Self::TopLeft,
-            Self::TopRight,
-            Self::BottomLeft,
-            Self::BottomRight,
-            Self::Center,
-        ]
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::TopLeft => "左上",
+            Self::TopCenter => "上中",
             Self::TopRight => "右上",
+            Self::MiddleLeft => "左中",
+            Self::MiddleRight => "右中",
             Self::BottomLeft => "左下",
+            Self::BottomCenter => "下中",
             Self::BottomRight => "右下",
             Self::Center => "居中",
         }
@@ -55,9 +52,9 @@ impl Default for FloatWindowControls {
     fn default() -> Self {
         Self {
             preset: FloatWindowPreset::TopLeft,
-            width: 200.0,
-            height: 200.0,
-            click_through: false,
+            width: 100.0,
+            height: 100.0,
+            click_through: true,
             opacity: 0.85,
         }
     }
@@ -69,12 +66,14 @@ pub struct BTMonitorApp {
     float_window_app: FloatWindowApp,
     bluetooth_service: BluetoothService,
     float_controls: FloatWindowControls,
+    should_exit: bool,
 }
 
 impl Default for BTMonitorApp {
     fn default() -> Self {
         let state = AppState::default();
-        let float_window = FloatWindowController::default();
+        let mut float_window = FloatWindowController::default();
+        float_window.open();
         let layout = float_window.layout();
         Self {
             bluetooth_service: BluetoothService::new(state.clone()),
@@ -88,6 +87,7 @@ impl Default for BTMonitorApp {
                 click_through: layout.click_through,
                 opacity: layout.opacity,
             },
+            should_exit: false,
         }
     }
 }
@@ -127,16 +127,6 @@ impl BTMonitorApp {
         self.state.mark_shared_heart_rate(None, false);
     }
 
-    fn open_float_window(&mut self) {
-        if self.state.selected_device().is_some() {
-            self.apply_float_controls();
-            self.float_window.open();
-            self.float_window_app
-                .set_click_through(self.float_controls.click_through);
-            self.float_window_app.set_opacity(self.float_controls.opacity);
-        }
-    }
-
     fn compute_preset_position(
         &self,
         preset: FloatWindowPreset,
@@ -148,16 +138,19 @@ impl BTMonitorApp {
         let screen_height = 1080.0;
         let x_max = (screen_width - width - margin).max(margin);
         let y_max = (screen_height - height - margin).max(margin);
+        let x_center = ((screen_width - width) / 2.0).round() as i32;
+        let y_center = ((screen_height - height) / 2.0).round() as i32;
 
         match preset {
             FloatWindowPreset::TopLeft => (margin as i32, margin as i32),
+            FloatWindowPreset::TopCenter => (x_center, margin as i32),
             FloatWindowPreset::TopRight => (x_max.round() as i32, margin as i32),
+            FloatWindowPreset::MiddleLeft => (margin as i32, y_center),
+            FloatWindowPreset::MiddleRight => (x_max.round() as i32, y_center),
             FloatWindowPreset::BottomLeft => (margin as i32, y_max.round() as i32),
+            FloatWindowPreset::BottomCenter => (x_center, y_max.round() as i32),
             FloatWindowPreset::BottomRight => (x_max.round() as i32, y_max.round() as i32),
-            FloatWindowPreset::Center => (
-                ((screen_width - width) / 2.0).round() as i32,
-                ((screen_height - height) / 2.0).round() as i32,
-            ),
+            FloatWindowPreset::Center => (x_center, y_center),
         }
     }
 
@@ -166,14 +159,8 @@ impl BTMonitorApp {
     }
 
     fn apply_float_controls(&mut self) {
-        let width = self
-            .float_controls
-            .width
-            .clamp(FLOAT_MIN_SIZE, FLOAT_MAX_SIZE);
-        let height = self
-            .float_controls
-            .height
-            .clamp(FLOAT_MIN_SIZE, FLOAT_MAX_SIZE);
+        let width = self.float_controls.width.max(FLOAT_MIN_SIZE);
+        let height = self.float_controls.height.max(FLOAT_MIN_SIZE);
         self.float_controls.width = width;
         self.float_controls.height = height;
         let (x, y) = self.compute_preset_position(self.float_controls.preset, width, height);
@@ -183,7 +170,7 @@ impl BTMonitorApp {
             width,
             height,
             click_through: self.float_controls.click_through,
-            opacity: self.float_controls.opacity.clamp(0.1, 1.0),
+            opacity: self.float_controls.opacity.clamp(0.0, 1.0),
         };
         self.float_window_app
             .set_click_through(self.float_controls.click_through);
@@ -205,16 +192,47 @@ impl BTMonitorApp {
             if ui.button(if scanning { "Stop" } else { "Scan" }).clicked() {
                 self.toggle_scan();
             }
-            ui.separator();
-
-            if self.float_window.is_open() {
-                if ui.button("Close Float").clicked() {
-                    self.float_window.close();
-                }
-            } else if ui.button("Float Window").clicked() {
-                self.open_float_window();
-            }
         });
+    }
+
+    fn show_main_panel_viewport(&mut self, ctx: &egui::Context) {
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("main_control_panel"),
+            egui::ViewportBuilder::default()
+                .with_title("BT Heart Rate Control")
+                .with_inner_size(egui::vec2(720.0, 820.0))
+                .with_position(egui::pos2(80.0, 80.0))
+                .with_resizable(true)
+                .with_transparent(false)
+                .with_decorations(true),
+            |ctx, _class| {
+                if ctx.input(|input| input.viewport().close_requested()) {
+                    self.float_window.close();
+                    self.should_exit = true;
+                    return;
+                }
+
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(egui::Color32::from_rgba_unmultiplied(20, 20, 30, 200)))
+                    .show(ctx, |ui| {
+                        self.render_toolbar(ui);
+                        ui.separator();
+
+                        if self.state.is_connecting() {
+                            ui.label(
+                                egui::RichText::new("Connected - Receiving HR...")
+                                    .color(egui::Color32::GREEN),
+                            );
+                        }
+
+                        self.render_device_list(ui);
+                        ui.separator();
+                        self.render_status_bar(ui);
+                        ui.separator();
+                        self.render_float_controls(ui);
+                    });
+            },
+        );
     }
 
     fn render_device_list(&mut self, ui: &mut egui::Ui) {
@@ -336,35 +354,56 @@ impl BTMonitorApp {
 
                 ui.horizontal_wrapped(|ui| {
                     ui.label("位置预设:");
-                    for preset in FloatWindowPreset::all() {
-                        let changed = ui
-                            .selectable_value(
-                                &mut self.float_controls.preset,
-                                preset,
-                                preset.label(),
-                            )
-                            .changed();
-                        if changed {
-                            self.apply_float_controls();
-                        }
-                    }
                 });
+
+                for row in [
+                    [
+                        FloatWindowPreset::TopLeft,
+                        FloatWindowPreset::TopCenter,
+                        FloatWindowPreset::TopRight,
+                    ],
+                    [
+                        FloatWindowPreset::MiddleLeft,
+                        FloatWindowPreset::Center,
+                        FloatWindowPreset::MiddleRight,
+                    ],
+                    [
+                        FloatWindowPreset::BottomLeft,
+                        FloatWindowPreset::BottomCenter,
+                        FloatWindowPreset::BottomRight,
+                    ],
+                ] {
+                    ui.horizontal(|ui| {
+                        for preset in row {
+                            let changed = ui
+                                .add_sized(
+                                    [72.0, 24.0],
+                                    egui::Button::new(preset.label()).selected(
+                                        self.float_controls.preset == preset,
+                                    ),
+                                )
+                                .clicked();
+                            if changed {
+                                self.float_controls.preset = preset;
+                                self.apply_float_controls();
+                            }
+                        }
+                    });
+                }
 
                 ui.horizontal(|ui| {
                     ui.label("宽度");
                     let width_changed = ui
                         .add(
                             egui::DragValue::new(&mut self.float_controls.width)
-                                .speed(1.0)
-                                .range(FLOAT_MIN_SIZE..=FLOAT_MAX_SIZE),
+                                .speed(1.0),
                         )
                         .changed();
                     ui.label("高度");
                     let height_changed = ui
                         .add(
                             egui::DragValue::new(&mut self.float_controls.height)
-                                .speed(1.0)
-                                .range(FLOAT_MIN_SIZE..=FLOAT_MAX_SIZE),
+                                .speed(1.0),
                         )
                         .changed();
                     let click_through_changed = ui
@@ -372,7 +411,7 @@ impl BTMonitorApp {
                         .changed();
                     let opacity_changed = ui
                         .add(
-                            egui::Slider::new(&mut self.float_controls.opacity, 0.1..=1.0)
+                            egui::Slider::new(&mut self.float_controls.opacity, 0.0..=1.0)
                                 .text("透明度"),
                         )
                         .changed();
@@ -393,42 +432,36 @@ impl eframe::App for BTMonitorApp {
         self.float_window.close();
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.should_exit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            let _ = frame;
+            return;
+        }
+
         ctx.request_repaint_after(Duration::from_millis(200));
 
         if self.float_window.is_open() {
-            self.float_window_app.show(ctx, self.float_window.layout());
+            self.show_main_panel_viewport(ctx);
         }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgba_unmultiplied(20, 20, 30, 200)))
-            .show(ctx, |ui| {
-                self.render_toolbar(ui);
-                ui.separator();
-
-                if self.state.is_connecting() {
-                    ui.label(
-                        egui::RichText::new("Connected - Receiving HR...")
-                            .color(egui::Color32::GREEN),
-                    );
-                }
-
-                self.render_device_list(ui);
-                ui.separator();
-                self.render_status_bar(ui);
-                ui.separator();
-                self.render_float_controls(ui);
-            });
+        self.float_window_app.set_click_through(self.float_controls.click_through);
+        self.float_window_app.set_opacity(self.float_controls.opacity);
+        self.float_window_app
+            .show_as_root_with_layout(ctx, self.float_window.layout());
     }
 }
 
 pub fn run_main_window() -> eframe::Result<()> {
     let mut native_options = eframe::NativeOptions::default();
+    native_options.renderer = eframe::Renderer::Glow;
+    native_options.multisampling = 1;
     native_options.viewport = native_options
         .viewport
         .clone()
         .with_transparent(true)
-        .with_decorations(true);
+        .with_decorations(false)
+        .with_always_on_top();
 
     eframe::run_native(
         "BT Heart Rate",
