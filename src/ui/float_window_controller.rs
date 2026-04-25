@@ -11,11 +11,11 @@ pub(crate) struct FloatWindowLayout {
 impl Default for FloatWindowLayout {
     fn default() -> Self {
         Self {
-            x: -100,
-            y: 10,
-            width: 200.0,
-            height: 200.0,
-            click_through: false,
+            x: 24,
+            y: 24,
+            width: 100.0,
+            height: 100.0,
+            click_through: true,
             opacity: 0.85,
         }
     }
