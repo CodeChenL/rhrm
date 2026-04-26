@@ -1,7 +1,17 @@
 use eframe::egui;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::app_state::AppState;
 use super::float_window_controller::FloatWindowLayout;
+
+const HISTORY_SECONDS: usize = 60;
+const HISTORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const FLOAT_WINDOW_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const HISTORY_MAX_POINTS: f32 = (HISTORY_SECONDS.saturating_sub(1)) as f32;
+const HISTORY_GRID_LINES: usize = 4;
+const ALERT_HEART_RATE_THRESHOLD: u16 = 120;
+const ALERT_FLASH_INTERVAL_SECONDS: f32 = 0.5;
 
 pub struct FloatWindowApp {
     state: AppState,
@@ -9,7 +19,11 @@ pub struct FloatWindowApp {
     connecting: bool,
     click_through: bool,
     opacity: f32,
-    hr_history: Vec<u16>,
+    last_applied_layout: Option<FloatWindowLayout>,
+    last_applied_click_through: Option<bool>,
+    hr_history: VecDeque<u16>,
+    last_plotted_heart_rate: Option<u16>,
+    last_history_sample_at: Option<Instant>,
 }
 
 impl FloatWindowApp {
@@ -20,23 +34,42 @@ impl FloatWindowApp {
             connecting: false,
             click_through,
             opacity,
-            hr_history: Vec::with_capacity(200),
+            last_applied_layout: None,
+            last_applied_click_through: None,
+            hr_history: VecDeque::with_capacity(HISTORY_SECONDS),
+            last_plotted_heart_rate: None,
+            last_history_sample_at: None,
         }
     }
 
-    fn sync_heart_rate(&mut self) -> bool {
+    fn sync_heart_rate(&mut self) {
+        let now = Instant::now();
         let snapshot = self.state.shared_snapshot();
         self.connecting = snapshot.connecting;
         self.heart_rate = snapshot.heart_rate;
+
         if let Some(heart_rate) = snapshot.heart_rate {
-            if self.hr_history.last().copied() != Some(heart_rate) {
-                self.hr_history.push(heart_rate);
-                if self.hr_history.len() > 200 {
-                    self.hr_history.remove(0);
+            self.last_plotted_heart_rate = Some(heart_rate);
+        } else if !snapshot.connecting {
+            self.last_plotted_heart_rate = None;
+            self.hr_history.clear();
+            self.last_history_sample_at = None;
+        }
+
+        if let Some(heart_rate) = self.last_plotted_heart_rate {
+            let should_sample = self
+                .last_history_sample_at
+                .map(|last| now.duration_since(last) >= HISTORY_SAMPLE_INTERVAL)
+                .unwrap_or(true);
+
+            if should_sample {
+                self.hr_history.push_back(heart_rate);
+                if self.hr_history.len() > HISTORY_SECONDS {
+                    self.hr_history.pop_front();
                 }
+                self.last_history_sample_at = Some(now);
             }
         }
-        true
     }
 
     pub(crate) fn set_click_through(&mut self, click_through: bool) {
@@ -48,7 +81,7 @@ impl FloatWindowApp {
     }
 
     pub(crate) fn show_as_root(&mut self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.click_through));
+        self.apply_click_through_if_needed(ctx);
         self.render_contents(ctx);
     }
 
@@ -57,12 +90,16 @@ impl FloatWindowApp {
         ctx: &egui::Context,
         layout: FloatWindowLayout,
     ) {
-        self.apply_root_layout(ctx, layout);
-        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.click_through));
+        self.apply_root_layout_if_needed(ctx, layout);
+        self.apply_click_through_if_needed(ctx);
         self.render_contents(ctx);
     }
 
-    fn apply_root_layout(&self, ctx: &egui::Context, layout: FloatWindowLayout) {
+    fn apply_root_layout_if_needed(&mut self, ctx: &egui::Context, layout: FloatWindowLayout) {
+        if self.last_applied_layout == Some(layout) {
+            return;
+        }
+
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             layout.x as f32,
             layout.y as f32,
@@ -71,23 +108,31 @@ impl FloatWindowApp {
             layout.width,
             layout.height,
         )));
+        self.last_applied_layout = Some(layout);
+    }
+
+    fn apply_click_through_if_needed(&mut self, ctx: &egui::Context) {
+        if self.last_applied_click_through == Some(self.click_through) {
+            return;
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.click_through));
+        self.last_applied_click_through = Some(self.click_through);
     }
 
     fn render_contents(&mut self, ctx: &egui::Context) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
         let background_alpha = (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         ctx.style_mut(|style| {
             style.visuals.panel_fill = egui::Color32::TRANSPARENT;
             style.visuals.window_fill = egui::Color32::TRANSPARENT;
         });
 
-        if self.sync_heart_rate() {
-            ctx.request_repaint();
-        }
+        self.sync_heart_rate();
 
         let heart_rate = self.heart_rate;
         let connecting = self.connecting;
         let hr_history = &self.hr_history;
+        ctx.request_repaint_after(FLOAT_WINDOW_REFRESH_INTERVAL);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
@@ -101,36 +146,50 @@ impl FloatWindowApp {
                     );
                 }
 
+                if let Some(heart_rate) = heart_rate.filter(|rate| *rate > ALERT_HEART_RATE_THRESHOLD)
+                {
+                    let phase = (ctx.input(|input| input.time) as f32 / ALERT_FLASH_INTERVAL_SECONDS)
+                        .fract();
+                    let flash_alpha = if phase < 0.5 { 96 } else { 24 };
+                    ui.painter().rect_filled(
+                        panel_rect,
+                       0.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 0, 0, flash_alpha),
+                    );
+                    let _ = heart_rate;
+                }
+
                 let text = if let Some(heart_rate) = heart_rate {
-                    format!("❤️ {} bpm", heart_rate)
+                    format!("❤ {} bpm", heart_rate)
                 } else if connecting {
-                    "❤️ ...".to_string()
+                    "❤ ...".to_string()
                 } else {
-                    "❤️ --".to_string()
+                    "❤ --".to_string()
                 };
 
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(text)
-                            .size(16.0)
-                            .color(egui::Color32::WHITE),
-                    );
-                });
+                ui.painter().text(
+                    panel_rect.min,
+                    egui::Align2::LEFT_TOP,
+                    text,
+                    egui::FontId::proportional(16.0),
+                    egui::Color32::WHITE,
+                );
 
                 if hr_history.len() > 1 {
-                    let min_hr = 50.0;
-                    let max_hr = 180.0;
-                    let max_points = 100.0;
                     let desired_size = egui::vec2(
-                        (panel_rect.width() - 16.0).max(0.0),
-                        (panel_rect.height() - 36.0).max(0.0),
+                        panel_rect.width().max(0.0),
+                        panel_rect.height().max(0.0),
                     );
                     let (wave_rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+                    let history_min = hr_history.iter().copied().min().unwrap_or(60) as f32;
+                    let history_max = hr_history.iter().copied().max().unwrap_or(100) as f32;
+                    let hr_padding = 4.0;
+                    let min_hr = (history_min - hr_padding).max(30.0);
+                    let max_hr = (history_max + hr_padding).min(220.0).max(min_hr + 1.0);
                     let mut points = Vec::new();
                     for (index, heart_rate) in hr_history.iter().enumerate() {
-                        let x = wave_rect.min.x + (index as f32 / max_points) * wave_rect.width();
+                        let x_ratio = index as f32 / HISTORY_MAX_POINTS;
+                        let x = wave_rect.min.x + x_ratio * wave_rect.width();
                         let y = wave_rect.max.y
                             - ((*heart_rate as f32 - min_hr) / (max_hr - min_hr))
                                 * wave_rect.height();
@@ -138,9 +197,17 @@ impl FloatWindowApp {
                     }
 
                     if points.len() > 1 {
+                        for step in 1..=HISTORY_GRID_LINES {
+                            let t = step as f32 / (HISTORY_GRID_LINES + 1) as f32;
+                            let y = egui::lerp(wave_rect.bottom()..=wave_rect.top(), t);
+                            ui.painter().line_segment(
+                                [egui::pos2(wave_rect.left(), y), egui::pos2(wave_rect.right(), y)],
+                                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 32)),
+                            );
+                        }
                         ui.painter().line(
                             points,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 100)),
+                            egui::Stroke::new(3.0, egui::Color32::from_rgb(80, 255, 120)),
                         );
                     }
                 }

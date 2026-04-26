@@ -35,7 +35,7 @@ pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
     }
 
     while state.is_scanning() {
-        log::info!("Starting scan...");
+        log::debug!("Starting scan...");
         state.set_error_message("Scanning...");
 
         let mut scan = match adapter.discover_devices(&[HRS_UUID]).await {
@@ -68,13 +68,13 @@ pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
                             log::warn!("Device discovery error: {}", error);
                         }
                         None => {
-                            log::info!("Scan finished, restarting...");
+                            log::debug!("Scan finished, restarting...");
                             break;
                         }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    log::info!("Scan timeout, restarting...");
+                    log::debug!("Scan timeout, restarting...");
                     break;
                 }
             }

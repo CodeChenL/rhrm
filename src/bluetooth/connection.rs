@@ -104,7 +104,7 @@ pub(crate) async fn connect_and_monitor_hr(addr: String, state: AppState) -> App
                             let now = Local::now().format("%H:%M:%S").to_string();
                             state.update_device_heart_rate(&addr, heart_rate, now);
                             state.mark_shared_heart_rate(Some(heart_rate), true);
-                            log::info!("HR: {} bpm", heart_rate);
+                            log::debug!("HR: {} bpm", heart_rate);
                         }
                     }
                     Some(Err(error)) => {
