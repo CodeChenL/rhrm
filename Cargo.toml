@@ -24,6 +24,8 @@ env_logger = "0.11"
 
 # 错误处理
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 # 时间
 chrono = "0.4"

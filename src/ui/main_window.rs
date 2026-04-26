@@ -1,17 +1,18 @@
 use eframe::egui;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::app_state::{AppState, DeviceInfo};
 use crate::bluetooth::BluetoothService;
+use crate::config::AppConfig;
 
 use super::float_window::FloatWindowApp;
 use super::float_window_controller::{FloatWindowController, FloatWindowLayout};
 
 const FLOAT_MIN_SIZE: f32 = 50.0;
+const CONTROL_PANEL_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FloatWindowPreset {
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) enum FloatWindowPreset {
     TopLeft,
     TopCenter,
     TopRight,
@@ -60,20 +61,25 @@ impl Default for FloatWindowControls {
     }
 }
 
-pub struct BTMonitorApp {
+pub struct RhrmApp {
     state: AppState,
     float_window: FloatWindowController,
     float_window_app: FloatWindowApp,
     bluetooth_service: BluetoothService,
     float_controls: FloatWindowControls,
+    config: AppConfig,
+    auto_connect_pending: bool,
+    control_panel_focused: bool,
     should_exit: bool,
 }
 
-impl Default for BTMonitorApp {
+impl Default for RhrmApp {
     fn default() -> Self {
+        let config = AppConfig::load();
         let state = AppState::default();
         let mut float_window = FloatWindowController::default();
         float_window.open();
+        float_window.apply_layout(config.float_layout);
         let layout = float_window.layout();
         Self {
             bluetooth_service: BluetoothService::new(state.clone()),
@@ -81,18 +87,21 @@ impl Default for BTMonitorApp {
             state,
             float_window,
             float_controls: FloatWindowControls {
-                preset: FloatWindowPreset::TopLeft,
+                preset: config.float_preset,
                 width: layout.width,
                 height: layout.height,
                 click_through: layout.click_through,
                 opacity: layout.opacity,
             },
+            config,
+            auto_connect_pending: true,
+            control_panel_focused: true,
             should_exit: false,
         }
     }
 }
 
-impl BTMonitorApp {
+impl RhrmApp {
     fn toggle_scan(&self) {
         if !self.state.toggle_scanning() {
             return;
@@ -105,10 +114,12 @@ impl BTMonitorApp {
         }
     }
 
-    fn connect_device(&self, addr: String) {
+    fn connect_device(&mut self, addr: String) {
         self.state.set_selected_device(Some(addr.clone()));
         self.state.set_connecting(true);
         self.state.clear_error();
+        self.config.last_device_addr = Some(addr.clone());
+        self.config.save();
 
         if let Err(error) = self.bluetooth_service.connect(addr.clone()) {
             self.state.set_connecting(false);
@@ -118,13 +129,26 @@ impl BTMonitorApp {
         }
     }
 
-    fn disconnect_device(&self) {
+    fn disconnect_device(&mut self) {
         if let Some(addr) = self.state.selected_device() {
             self.state.update_device_connection(&addr, false);
         }
         self.state.set_selected_device(None);
         self.state.set_connecting(false);
         self.state.mark_shared_heart_rate(None, false);
+    }
+
+    fn try_auto_connect(&mut self) {
+        if !self.auto_connect_pending {
+            return;
+        }
+        self.auto_connect_pending = false;
+
+        let Some(addr) = self.config.last_device_addr.clone() else {
+            return;
+        };
+
+        self.connect_device(addr);
     }
 
     fn compute_preset_position(
@@ -177,6 +201,9 @@ impl BTMonitorApp {
         self.float_window_app.set_opacity(layout.opacity);
 
         self.float_window.apply_layout(layout);
+        self.config.float_layout = layout;
+        self.config.float_preset = self.float_controls.preset;
+        self.config.save();
     }
 
     fn reset_float_controls(&mut self) {
@@ -186,7 +213,7 @@ impl BTMonitorApp {
 
     fn render_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("BT Heart Rate");
+            ui.heading("rhrm");
             ui.separator();
             let scanning = self.state.is_scanning();
             if ui.button(if scanning { "Stop" } else { "Scan" }).clicked() {
@@ -195,17 +222,29 @@ impl BTMonitorApp {
         });
     }
 
+    fn update_control_panel_focus(&mut self, ctx: &egui::Context) {
+        self.control_panel_focused = ctx
+            .input(|input| input.viewport().focused)
+            .unwrap_or(true);
+
+        if self.control_panel_focused {
+            ctx.request_repaint_after(CONTROL_PANEL_REPAINT_INTERVAL);
+        }
+    }
+
     fn show_main_panel_viewport(&mut self, ctx: &egui::Context) {
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("main_control_panel"),
             egui::ViewportBuilder::default()
-                .with_title("BT Heart Rate Control")
+                .with_title("rhrm control panel")
                 .with_inner_size(egui::vec2(720.0, 820.0))
                 .with_position(egui::pos2(80.0, 80.0))
                 .with_resizable(true)
                 .with_transparent(false)
                 .with_decorations(true),
             |ctx, _class| {
+                self.update_control_panel_focus(ctx);
+
                 if ctx.input(|input| input.viewport().close_requested()) {
                     self.float_window.close();
                     self.should_exit = true;
@@ -306,7 +345,7 @@ impl BTMonitorApp {
             };
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("❤️ {} bpm", heart_rate))
+                    egui::RichText::new(format!("❤ {} bpm", heart_rate))
                         .size(20.0)
                         .color(color),
                 );
@@ -427,7 +466,7 @@ impl BTMonitorApp {
     }
 }
 
-impl eframe::App for BTMonitorApp {
+impl eframe::App for RhrmApp {
     fn on_exit(&mut self, _ctx: Option<&eframe::glow::Context>) {
         self.float_window.close();
     }
@@ -439,7 +478,7 @@ impl eframe::App for BTMonitorApp {
             return;
         }
 
-        ctx.request_repaint_after(Duration::from_millis(200));
+        self.try_auto_connect();
 
         if self.float_window.is_open() {
             self.show_main_panel_viewport(ctx);
@@ -455,6 +494,7 @@ impl eframe::App for BTMonitorApp {
 pub fn run_main_window() -> eframe::Result<()> {
     let mut native_options = eframe::NativeOptions::default();
     native_options.renderer = eframe::Renderer::Glow;
+    native_options.vsync = true;
     native_options.multisampling = 1;
     native_options.viewport = native_options
         .viewport
@@ -464,28 +504,47 @@ pub fn run_main_window() -> eframe::Result<()> {
         .with_always_on_top();
 
     eframe::run_native(
-        "BT Heart Rate",
+        "rhrm",
         native_options,
         Box::new(|cc| {
             let mut fonts = egui::FontDefinitions::default();
-            if let Ok(data) = std::fs::read("NotoSansCJKsc-Regular.otf") {
-                fonts.font_data.insert(
-                    "noto_sans_sc".to_owned(),
-                    Arc::new(egui::FontData::from_owned(data)),
-                );
-                fonts
-                    .families
-                    .entry(egui::FontFamily::Proportional)
-                    .or_default()
-                    .insert(0, "noto_sans_sc".to_owned());
-                fonts
-                    .families
-                    .entry(egui::FontFamily::Monospace)
-                    .or_default()
-                    .insert(0, "noto_sans_sc".to_owned());
-            }
+            let ubuntu_mono = "ubuntu_mono".to_owned();
+            let noto_sans_sc = "noto_sans_sc".to_owned();
+
+            fonts.font_data.insert(
+                ubuntu_mono.clone(),
+                Arc::new(egui::FontData::from_static(include_bytes!(
+                    "../../UbuntuMono-R.ttf"
+                ))),
+            );
+            fonts.font_data.insert(
+                noto_sans_sc.clone(),
+                Arc::new(egui::FontData::from_static(include_bytes!(
+                    "../../NotoSansCJKsc-Regular.otf"
+                ))),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, ubuntu_mono.clone());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, ubuntu_mono);
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(1, noto_sans_sc.clone());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(1, noto_sans_sc);
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(BTMonitorApp::default()))
+            Ok(Box::new(RhrmApp::default()))
         }),
     )
 }
