@@ -1,5 +1,7 @@
 use eframe::egui;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::app_state::{AppState, DeviceInfo};
 use crate::bluetooth::BluetoothService;
@@ -10,6 +12,8 @@ use super::float_window_controller::{FloatWindowController, FloatWindowLayout};
 
 const FLOAT_MIN_SIZE: f32 = 50.0;
 const CONTROL_PANEL_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+static CTRL_C_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum FloatWindowPreset {
@@ -71,6 +75,7 @@ pub struct RhrmApp {
     auto_connect_pending: bool,
     control_panel_focused: bool,
     should_exit: bool,
+    pending_exit_deadline: Option<Instant>,
 }
 
 impl Default for RhrmApp {
@@ -97,6 +102,7 @@ impl Default for RhrmApp {
             auto_connect_pending: true,
             control_panel_focused: true,
             should_exit: false,
+            pending_exit_deadline: None,
         }
     }
 }
@@ -246,6 +252,8 @@ impl RhrmApp {
                 self.update_control_panel_focus(ctx);
 
                 if ctx.input(|input| input.viewport().close_requested()) {
+                    self.state.set_scanning(false);
+                    self.disconnect_device();
                     self.float_window.close();
                     self.should_exit = true;
                     return;
@@ -468,10 +476,27 @@ impl RhrmApp {
 
 impl eframe::App for RhrmApp {
     fn on_exit(&mut self, _ctx: Option<&eframe::glow::Context>) {
+        self.state.set_scanning(false);
+        self.disconnect_device();
         self.float_window.close();
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if CTRL_C_EXIT_REQUESTED.swap(false, Ordering::SeqCst) {
+            log::info!("Ctrl+C received, disconnecting...");
+            self.state.set_scanning(false);
+            self.disconnect_device();
+            self.pending_exit_deadline = Some(Instant::now() + std::time::Duration::from_millis(500));
+        }
+
+        if let Some(deadline) = self.pending_exit_deadline {
+            if Instant::now() >= deadline {
+                self.should_exit = true;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+
         if self.should_exit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             let _ = frame;
@@ -492,6 +517,12 @@ impl eframe::App for RhrmApp {
 }
 
 pub fn run_main_window() -> eframe::Result<()> {
+    if let Err(error) = ctrlc::set_handler(|| {
+        CTRL_C_EXIT_REQUESTED.store(true, Ordering::SeqCst);
+    }) {
+        log::warn!("Failed to set Ctrl+C handler: {error}");
+    }
+
     let mut native_options = eframe::NativeOptions::default();
     native_options.renderer = eframe::Renderer::Glow;
     native_options.vsync = true;

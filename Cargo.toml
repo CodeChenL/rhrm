@@ -1,5 +1,5 @@
 [package]
-name = "bt-monitor"
+name = "rhrm"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,6 +10,7 @@ egui = "0.33.3"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.4"
 
 # 蓝牙 - bluest
 bluest = "0.4"
