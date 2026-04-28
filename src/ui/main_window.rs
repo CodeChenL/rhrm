@@ -11,7 +11,9 @@ use super::float_window::FloatWindowApp;
 use super::float_window_controller::{
     FloatWindowController, FloatWindowLayout, FloatWindowPreset, FLOAT_WINDOW_MARGIN,
 };
+#[cfg(target_os = "linux")]
 use super::wayland_overlay::WaylandOverlayHandle;
+#[cfg(target_os = "linux")]
 use super::spawn_wayland_overlay;
 
 const FLOAT_MIN_SIZE: f32 = 50.0;
@@ -50,6 +52,7 @@ pub struct RhrmApp {
     state: AppState,
     float_window: FloatWindowController,
     float_window_app: FloatWindowApp,
+    #[cfg(target_os = "linux")]
     wayland_overlay: Option<WaylandOverlayHandle>,
     bluetooth_service: BluetoothService,
     float_controls: FloatWindowControls,
@@ -72,6 +75,7 @@ impl Default for RhrmApp {
         float_window.set_preset(config.float_preset);
         float_window.apply_layout(config.float_layout);
         let layout = float_window.layout();
+        #[cfg(target_os = "linux")]
         let wayland_overlay = if wayland_session {
             match spawn_wayland_overlay(state.clone(), float_window.shared_state()) {
                 Ok(handle) => Some(handle),
@@ -89,6 +93,7 @@ impl Default for RhrmApp {
             float_window_app: FloatWindowApp::new(state.clone(), layout.click_through, layout.opacity),
             state,
             float_window,
+            #[cfg(target_os = "linux")]
             wayland_overlay,
             float_controls: FloatWindowControls {
                 preset: config.float_preset,
@@ -120,6 +125,16 @@ impl RhrmApp {
 
         self.screen_size = Some(screen_size);
         self.apply_float_controls();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wayland_overlay_ready(&self) -> bool {
+        !self.wayland_session || self.wayland_overlay.is_some()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn wayland_overlay_ready(&self) -> bool {
+        true
     }
 
     fn toggle_scan(&self) {
@@ -421,7 +436,7 @@ impl RhrmApp {
                     ui.label("位置预设:");
                 });
 
-                ui.add_enabled_ui(!self.wayland_session || self.wayland_overlay.is_some(), |ui| {
+                ui.add_enabled_ui(self.wayland_overlay_ready(), |ui| {
                     for row in [
                         [
                             FloatWindowPreset::TopLeft,
@@ -490,6 +505,7 @@ impl RhrmApp {
                     }
                 });
 
+                #[cfg(target_os = "linux")]
                 if self.wayland_session && self.wayland_overlay.is_none() {
                     ui.label(
                         egui::RichText::new(
@@ -509,6 +525,7 @@ impl eframe::App for RhrmApp {
         self.state.set_scanning(false);
         self.disconnect_device();
         self.float_window.close();
+        #[cfg(target_os = "linux")]
         if let Some(overlay) = &self.wayland_overlay {
             overlay.request_stop();
         }
@@ -521,6 +538,7 @@ impl eframe::App for RhrmApp {
             log::info!("Ctrl+C received, disconnecting...");
             self.state.set_scanning(false);
             self.disconnect_device();
+            #[cfg(target_os = "linux")]
             if let Some(overlay) = &self.wayland_overlay {
                 overlay.request_stop();
             }
@@ -549,6 +567,7 @@ impl eframe::App for RhrmApp {
         }
 
         if self.wayland_session {
+            #[cfg(target_os = "linux")]
             if let Some(overlay) = &self.wayland_overlay {
                 if !overlay.is_running() {
                     self.state.set_error_message("Wayland overlay stopped unexpectedly");

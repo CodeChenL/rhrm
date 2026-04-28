@@ -112,6 +112,7 @@ impl FloatWindowController {
         self.shared.snapshot().layout
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn shared_state(&self) -> FloatWindowSharedState {
         self.shared.clone()
     }
