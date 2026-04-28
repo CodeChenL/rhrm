@@ -138,6 +138,7 @@ impl FloatWindowApp {
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
+
                 if background_alpha > 0 {
                     ui.painter().rect_filled(
                         panel_rect,

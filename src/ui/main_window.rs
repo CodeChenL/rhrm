@@ -8,40 +8,21 @@ use crate::bluetooth::BluetoothService;
 use crate::config::AppConfig;
 
 use super::float_window::FloatWindowApp;
-use super::float_window_controller::{FloatWindowController, FloatWindowLayout};
+use super::float_window_controller::{
+    FloatWindowController, FloatWindowLayout, FloatWindowPreset, FLOAT_WINDOW_MARGIN,
+};
+use super::wayland_overlay::WaylandOverlayHandle;
+use super::spawn_wayland_overlay;
 
 const FLOAT_MIN_SIZE: f32 = 50.0;
 const CONTROL_PANEL_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 static CTRL_C_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) enum FloatWindowPreset {
-    TopLeft,
-    TopCenter,
-    TopRight,
-    MiddleLeft,
-    MiddleRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight,
-    Center,
-}
-
-impl FloatWindowPreset {
-    fn label(self) -> &'static str {
-        match self {
-            Self::TopLeft => "左上",
-            Self::TopCenter => "上中",
-            Self::TopRight => "右上",
-            Self::MiddleLeft => "左中",
-            Self::MiddleRight => "右中",
-            Self::BottomLeft => "左下",
-            Self::BottomCenter => "下中",
-            Self::BottomRight => "右下",
-            Self::Center => "居中",
-        }
-    }
+fn is_wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_SOCKET").is_some()
+        || matches!(std::env::var("XDG_SESSION_TYPE").ok().as_deref(), Some("wayland"))
 }
 
 #[derive(Clone)]
@@ -69,6 +50,7 @@ pub struct RhrmApp {
     state: AppState,
     float_window: FloatWindowController,
     float_window_app: FloatWindowApp,
+    wayland_overlay: Option<WaylandOverlayHandle>,
     bluetooth_service: BluetoothService,
     float_controls: FloatWindowControls,
     config: AppConfig,
@@ -76,21 +58,38 @@ pub struct RhrmApp {
     control_panel_focused: bool,
     should_exit: bool,
     pending_exit_deadline: Option<Instant>,
+    screen_size: Option<egui::Vec2>,
+    wayland_session: bool,
 }
 
 impl Default for RhrmApp {
     fn default() -> Self {
+        let wayland_session = is_wayland_session();
         let config = AppConfig::load();
         let state = AppState::default();
         let mut float_window = FloatWindowController::default();
         float_window.open();
+        float_window.set_preset(config.float_preset);
         float_window.apply_layout(config.float_layout);
         let layout = float_window.layout();
+        let wayland_overlay = if wayland_session {
+            match spawn_wayland_overlay(state.clone(), float_window.shared_state()) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    log::error!("Failed to start Wayland overlay: {error}");
+                    state.set_error_message(format!("Failed to start Wayland overlay: {error}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Self {
             bluetooth_service: BluetoothService::new(state.clone()),
             float_window_app: FloatWindowApp::new(state.clone(), layout.click_through, layout.opacity),
             state,
             float_window,
+            wayland_overlay,
             float_controls: FloatWindowControls {
                 preset: config.float_preset,
                 width: layout.width,
@@ -103,11 +102,26 @@ impl Default for RhrmApp {
             control_panel_focused: true,
             should_exit: false,
             pending_exit_deadline: None,
+            screen_size: None,
+            wayland_session,
         }
     }
 }
 
 impl RhrmApp {
+    fn update_screen_size(&mut self, screen_size: Option<egui::Vec2>) {
+        let Some(screen_size) = screen_size else {
+            return;
+        };
+
+        if self.screen_size == Some(screen_size) {
+            return;
+        }
+
+        self.screen_size = Some(screen_size);
+        self.apply_float_controls();
+    }
+
     fn toggle_scan(&self) {
         if !self.state.toggle_scanning() {
             return;
@@ -163,9 +177,11 @@ impl RhrmApp {
         width: f32,
         height: f32,
     ) -> (i32, i32) {
-        let margin = 24.0;
-        let screen_width = 1920.0;
-        let screen_height = 1080.0;
+        let margin = FLOAT_WINDOW_MARGIN as f32;
+        let (screen_width, screen_height) = self
+            .screen_size
+            .map(|s| (s.x, s.y))
+            .unwrap_or((1920.0, 1080.0));
         let x_max = (screen_width - width - margin).max(margin);
         let y_max = (screen_height - height - margin).max(margin);
         let x_center = ((screen_width - width) / 2.0).round() as i32;
@@ -206,6 +222,7 @@ impl RhrmApp {
             .set_click_through(self.float_controls.click_through);
         self.float_window_app.set_opacity(layout.opacity);
 
+        self.float_window.set_preset(self.float_controls.preset);
         self.float_window.apply_layout(layout);
         self.config.float_layout = layout;
         self.config.float_preset = self.float_controls.preset;
@@ -249,6 +266,7 @@ impl RhrmApp {
                 .with_transparent(false)
                 .with_decorations(true),
             |ctx, _class| {
+                self.update_screen_size(ctx.input(|input| input.viewport().monitor_size));
                 self.update_control_panel_focus(ctx);
 
                 if ctx.input(|input| input.viewport().close_requested()) {
@@ -403,40 +421,42 @@ impl RhrmApp {
                     ui.label("位置预设:");
                 });
 
-                for row in [
-                    [
-                        FloatWindowPreset::TopLeft,
-                        FloatWindowPreset::TopCenter,
-                        FloatWindowPreset::TopRight,
-                    ],
-                    [
-                        FloatWindowPreset::MiddleLeft,
-                        FloatWindowPreset::Center,
-                        FloatWindowPreset::MiddleRight,
-                    ],
-                    [
-                        FloatWindowPreset::BottomLeft,
-                        FloatWindowPreset::BottomCenter,
-                        FloatWindowPreset::BottomRight,
-                    ],
-                ] {
-                    ui.horizontal(|ui| {
-                        for preset in row {
-                            let changed = ui
-                                .add_sized(
-                                    [72.0, 24.0],
-                                    egui::Button::new(preset.label()).selected(
-                                        self.float_controls.preset == preset,
-                                    ),
-                                )
-                                .clicked();
-                            if changed {
-                                self.float_controls.preset = preset;
-                                self.apply_float_controls();
+                ui.add_enabled_ui(!self.wayland_session || self.wayland_overlay.is_some(), |ui| {
+                    for row in [
+                        [
+                            FloatWindowPreset::TopLeft,
+                            FloatWindowPreset::TopCenter,
+                            FloatWindowPreset::TopRight,
+                        ],
+                        [
+                            FloatWindowPreset::MiddleLeft,
+                            FloatWindowPreset::Center,
+                            FloatWindowPreset::MiddleRight,
+                        ],
+                        [
+                            FloatWindowPreset::BottomLeft,
+                            FloatWindowPreset::BottomCenter,
+                            FloatWindowPreset::BottomRight,
+                        ],
+                    ] {
+                        ui.horizontal(|ui| {
+                            for preset in row {
+                                let changed = ui
+                                    .add_sized(
+                                        [72.0, 24.0],
+                                        egui::Button::new(preset.label()).selected(
+                                            self.float_controls.preset == preset,
+                                        ),
+                                    )
+                                    .clicked();
+                                if changed {
+                                    self.float_controls.preset = preset;
+                                    self.apply_float_controls();
+                                }
                             }
-                        }
-                    });
-                }
+                        });
+                    }
+                });
 
                 ui.horizontal(|ui| {
                     ui.label("宽度");
@@ -469,6 +489,16 @@ impl RhrmApp {
                         self.reset_float_controls();
                     }
                 });
+
+                if self.wayland_session && self.wayland_overlay.is_none() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Wayland layer-shell overlay 启动失败，当前已回退为普通窗口模式。",
+                        )
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
+                }
             });
         });
     }
@@ -479,21 +509,30 @@ impl eframe::App for RhrmApp {
         self.state.set_scanning(false);
         self.disconnect_device();
         self.float_window.close();
+        if let Some(overlay) = &self.wayland_overlay {
+            overlay.request_stop();
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_screen_size(ctx.input(|input| input.viewport().monitor_size));
+
         if CTRL_C_EXIT_REQUESTED.swap(false, Ordering::SeqCst) {
             log::info!("Ctrl+C received, disconnecting...");
             self.state.set_scanning(false);
             self.disconnect_device();
-            self.pending_exit_deadline = Some(Instant::now() + std::time::Duration::from_millis(500));
+            if let Some(overlay) = &self.wayland_overlay {
+                overlay.request_stop();
+            }
+            self.float_window.close();
+            self.pending_exit_deadline = Some(Instant::now() + std::time::Duration::from_millis(100));
         }
 
         if let Some(deadline) = self.pending_exit_deadline {
             if Instant::now() >= deadline {
                 self.should_exit = true;
             } else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
         }
 
@@ -509,10 +548,18 @@ impl eframe::App for RhrmApp {
             self.show_main_panel_viewport(ctx);
         }
 
-        self.float_window_app.set_click_through(self.float_controls.click_through);
-        self.float_window_app.set_opacity(self.float_controls.opacity);
-        self.float_window_app
-            .show_as_root_with_layout(ctx, self.float_window.layout());
+        if self.wayland_session {
+            if let Some(overlay) = &self.wayland_overlay {
+                if !overlay.is_running() {
+                    self.state.set_error_message("Wayland overlay stopped unexpectedly");
+                }
+            }
+        } else {
+            self.float_window_app.set_click_through(self.float_controls.click_through);
+            self.float_window_app.set_opacity(self.float_controls.opacity);
+            self.float_window_app
+                .show_as_root_with_layout(ctx, self.float_window.layout());
+        }
     }
 }
 
@@ -527,12 +574,22 @@ pub fn run_main_window() -> eframe::Result<()> {
     native_options.renderer = eframe::Renderer::Glow;
     native_options.vsync = true;
     native_options.multisampling = 1;
-    native_options.viewport = native_options
-        .viewport
-        .clone()
-        .with_transparent(true)
-        .with_decorations(false)
-        .with_always_on_top();
+
+    if is_wayland_session() {
+        native_options.viewport = native_options
+            .viewport
+            .clone()
+            .with_title("rhrm")
+            .with_inner_size(egui::vec2(1.0, 1.0))
+            .with_transparent(true);
+    } else {
+        native_options.viewport = native_options
+            .viewport
+            .clone()
+            .with_transparent(true)
+            .with_decorations(false)
+            .with_always_on_top();
+    }
 
     eframe::run_native(
         "rhrm",

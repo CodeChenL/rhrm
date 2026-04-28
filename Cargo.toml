@@ -34,6 +34,10 @@ chrono = "0.4"
 # 共享内存
 shared_memory = "0.12"
 
+# Wayland overlay
+smithay-client-toolkit = "0.19.2"
+wayland-client = "0.31.12"
+
 [profile.release]
 lto = true
 opt-level = "z"

@@ -59,7 +59,7 @@ pub(crate) async fn connect_and_monitor_hr(addr: String, state: AppState) -> App
             log::info!("Scanning for device {}...", addr);
             state.set_error_message("Scanning...");
             let mut scan = adapter
-                .discover_devices(&[HRS_UUID])
+                .discover_devices(&[])
                 .await
                 .map_err(bluetooth_error)?;
             let mut found_device = None;

@@ -38,12 +38,12 @@ pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
         log::debug!("Starting scan...");
         state.set_error_message("Scanning...");
 
-        let mut scan = match adapter.discover_devices(&[HRS_UUID]).await {
+        let mut scan = match adapter.scan(&[]).await {
             Ok(scan) => scan,
             Err(error) => {
                 log::warn!("Scan error: {}", error);
                 state.set_error_message(format!("Scan error: {}", error));
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -52,20 +52,24 @@ pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
             tokio::select! {
                 result = async { scan.next().await } => {
                     match result {
-                        Some(Ok(device)) => {
+                        Some(discovered_device) => {
+                            let device = discovered_device.device;
+                            let name = device.name().unwrap_or_else(|| "Unknown".to_string());
+                            let is_connectable = discovered_device.adv_data.is_connectable;
+                            if name == "Unknown" && !is_connectable {
+                                continue;
+                            }
+
                             let addr = format!("{:?}", device.id());
                             let now = Local::now().format("%H:%M:%S").to_string();
                             state.upsert_device(DeviceInfo {
-                                name: device.name().unwrap_or_else(|| "Unknown".to_string()),
+                                name,
                                 addr,
-                                rssi: 0,
+                                rssi: discovered_device.rssi.unwrap_or_default(),
                                 heart_rate: None,
                                 last_seen: now,
                                 connected: false,
                             });
-                        }
-                        Some(Err(error)) => {
-                            log::warn!("Device discovery error: {}", error);
                         }
                         None => {
                             log::debug!("Scan finished, restarting...");
