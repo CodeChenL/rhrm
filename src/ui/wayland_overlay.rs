@@ -29,7 +29,7 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 
-use crate::app_state::{AppState, SharedHeartRateSnapshot};
+use crate::app_state::{AppState, HistorySnapshot, SharedHeartRateSnapshot};
 use crate::error::{AppError, AppResult};
 
 use super::{FloatWindowPreset, FloatWindowSharedSnapshot, FloatWindowSharedState};
@@ -154,7 +154,9 @@ fn run_wayland_overlay(
         height: OVERLAY_BASELINE_HEIGHT,
         first_configure: true,
         configured: false,
+        scale_factor: 1,
         last_rendered_revision: None,
+        last_hr_version: 0,
         redraw_token: None,
         exit: false,
     };
@@ -189,7 +191,9 @@ struct WaylandOverlayApp {
     height: u32,
     first_configure: bool,
     configured: bool,
+    scale_factor: u32,
     last_rendered_revision: Option<u64>,
+    last_hr_version: u64,
     redraw_token: Option<RegistrationToken>,
     exit: bool,
 }
@@ -235,7 +239,8 @@ impl WaylandOverlayApp {
             return;
         }
 
-        if self.last_rendered_revision == Some(shared.revision) {
+        let hr = self.app_state.shared_snapshot();
+        if self.last_rendered_revision == Some(shared.revision) && self.last_hr_version == hr.version {
             return;
         }
 
@@ -248,34 +253,40 @@ impl WaylandOverlayApp {
     fn render(&mut self, shared: FloatWindowSharedSnapshot) -> AppResult<()> {
         self.width = shared.layout.width.max(1.0).round() as u32;
         self.height = shared.layout.height.max(1.0).round() as u32;
+        let scale = self.scale_factor.max(1);
+        let buffer_width = self.width.saturating_mul(scale);
+        let buffer_height = self.height.saturating_mul(scale);
 
         apply_anchor_and_margin(&self.layer, shared.preset);
         self.layer.set_size(self.width, self.height);
         self.update_input_region(shared.layout.click_through)?;
 
-        let stride = self.width as i32 * 4;
+        let stride = buffer_width as i32 * 4;
         let (buffer, canvas) = self
             .pool
             .create_buffer(
-                self.width as i32,
-                self.height as i32,
+                buffer_width as i32,
+                buffer_height as i32,
                 stride,
                 wl_shm::Format::Argb8888,
             )
             .map_err(|error| AppError::Bluetooth(format!("failed to create Wayland buffer: {error}")))?;
 
         let hr = self.app_state.shared_snapshot();
-        draw_overlay(canvas, self.width, self.height, shared.layout.opacity, hr);
+        let history = self.app_state.history_snapshot();
+        draw_overlay(canvas, buffer_width, buffer_height, shared.layout.opacity, hr, &history, scale);
 
+        self.layer.wl_surface().set_buffer_scale(scale as i32);
         self.layer
             .wl_surface()
-            .damage_buffer(0, 0, self.width as i32, self.height as i32);
+            .damage_buffer(0, 0, buffer_width as i32, buffer_height as i32);
         buffer
             .attach_to(self.layer.wl_surface())
             .map_err(|error| AppError::Bluetooth(format!("failed to attach Wayland buffer: {error}")))?;
         self.layer.commit();
 
         self.last_rendered_revision = Some(shared.revision);
+        self.last_hr_version = hr.version;
         Ok(())
     }
 
@@ -321,6 +332,8 @@ fn draw_overlay(
     height: u32,
     opacity: f32,
     snapshot: SharedHeartRateSnapshot,
+    history: &HistorySnapshot,
+    scale: u32,
 ) {
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
     let bg = [15, 15, 20, alpha];
@@ -349,8 +362,83 @@ fn draw_overlay(
         "❤ --".to_owned()
     };
 
-    draw_text(canvas, width, height, 6, 4, &text, fg);
-    draw_rule(canvas, width, height, TEXT_BLOCK_HEIGHT.min(height.saturating_sub(1)), [255, 255, 255, 40]);
+    draw_text(canvas, width, height, 6 * scale, 4 * scale, &text, fg, scale);
+    draw_rule(canvas, width, height, (TEXT_BLOCK_HEIGHT * scale).min(height.saturating_sub(1)), [255, 255, 255, 40]);
+
+    draw_history_curve(canvas, width, height, TEXT_BLOCK_HEIGHT.saturating_add(2) * scale, history);
+}
+
+fn draw_history_curve(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    top: u32,
+    history: &HistorySnapshot,
+) {
+    if history.values.len() < 2 || top >= height {
+        return;
+    }
+
+    let chart_height = height.saturating_sub(top);
+    if chart_height < 4 {
+        return;
+    }
+
+    let min = history.values.iter().copied().min().unwrap_or(60) as f32;
+    let max = history.values.iter().copied().max().unwrap_or(100) as f32;
+    let padding = 4.0;
+    let hr_min = (min - padding).max(30.0);
+    let hr_max = (max + padding).min(220.0).max(hr_min + 1.0);
+    let range = hr_max - hr_min;
+
+    let n = history.values.len();
+    let color = [80, 255, 120, 255];
+
+    for i in 0..n.saturating_sub(1) {
+        let x0 = (i as f32 / (n - 1) as f32 * (width - 1) as f32).round() as u32;
+        let y0 = top + ((hr_max - history.values[i] as f32) / range * (chart_height - 1) as f32).round() as u32;
+        let x1 = ((i + 1) as f32 / (n - 1) as f32 * (width - 1) as f32).round() as u32;
+        let y1 = top + ((hr_max - history.values[i + 1] as f32) / range * (chart_height - 1) as f32).round() as u32;
+
+        draw_line(canvas, width, height, x0, y0, x1, y1, color);
+    }
+}
+
+fn draw_line(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    color: [u8; 4],
+) {
+    let dx = (x1 as i32 - x0 as i32).abs();
+    let dy = -(y1 as i32 - y0 as i32).abs();
+    let sx = if x0 < x1 { 1i32 } else { -1i32 };
+    let sy = if y0 < y1 { 1i32 } else { -1i32 };
+    let mut err = dx + dy;
+    let mut x = x0 as i32;
+    let mut y = y0 as i32;
+
+    loop {
+        if x >= 0 && (x as u32) < width && y >= 0 && (y as u32) < height {
+            put_pixel(canvas, width, x as u32, y as u32, color);
+        }
+        if x == x1 as i32 && y == y1 as i32 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
 }
 
 fn blend_rgba(dst: [u8; 4], src: [u8; 4]) -> [u8; 4] {
@@ -385,14 +473,23 @@ fn draw_rule(canvas: &mut [u8], width: u32, height: u32, y: u32, color: [u8; 4])
     }
 }
 
-fn draw_text(canvas: &mut [u8], width: u32, height: u32, start_x: u32, start_y: u32, text: &str, color: [u8; 4]) {
+fn draw_text(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    start_x: u32,
+    start_y: u32,
+    text: &str,
+    color: [u8; 4],
+    scale: u32,
+) {
     let mut x = start_x;
     for ch in text.chars() {
         if let Some(bitmap) = glyph_rows(ch) {
-            draw_glyph(canvas, width, height, x, start_y, bitmap, color);
+            draw_glyph(canvas, width, height, x, start_y, bitmap, color, scale);
         }
-        x = x.saturating_add(6);
-        if x + 5 >= width {
+        x = x.saturating_add(6 * scale);
+        if x + 5 * scale >= width {
             break;
         }
     }
@@ -406,9 +503,10 @@ fn draw_glyph(
     start_y: u32,
     rows: [u8; 7],
     color: [u8; 4],
+    scale: u32,
 ) {
     for (row_index, row_bits) in rows.into_iter().enumerate() {
-        let y = start_y + row_index as u32;
+        let y = start_y + row_index as u32 * scale;
         if y >= height {
             break;
         }
@@ -416,11 +514,32 @@ fn draw_glyph(
             if row_bits & (1 << (4 - bit)) == 0 {
                 continue;
             }
-            let x = start_x + bit;
+            let x = start_x + bit * scale;
             if x >= width {
                 continue;
             }
-            put_pixel(canvas, width, x, y, color);
+            fill_rect(canvas, width, height, x, y, scale, scale, color);
+        }
+    }
+}
+
+fn fill_rect(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    color: [u8; 4],
+) {
+    for dy in 0..h {
+        for dx in 0..w {
+            let px = x + dx;
+            let py = y + dy;
+            if px < width && py < height {
+                put_pixel(canvas, width, px, py, color);
+            }
         }
     }
 }
@@ -470,8 +589,13 @@ impl CompositorHandler for WaylandOverlayApp {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        new_factor: i32,
     ) {
+        let scale = new_factor.max(1) as u32;
+        if self.scale_factor != scale {
+            self.scale_factor = scale;
+            self.last_rendered_revision = None;
+        }
     }
 
     fn transform_changed(
@@ -542,6 +666,7 @@ impl LayerShellHandler for WaylandOverlayApp {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        let old_size = (self.width, self.height);
         if configure.new_size.0 != 0 {
             self.width = configure.new_size.0;
         }
@@ -550,7 +675,7 @@ impl LayerShellHandler for WaylandOverlayApp {
         }
 
         self.configured = true;
-        if self.first_configure {
+        if self.first_configure || old_size != (self.width, self.height) {
             self.first_configure = false;
             self.last_rendered_revision = None;
         }
