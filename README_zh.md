@@ -93,8 +93,8 @@ bt-monitor/
 
 | 系统      | 路径                                          |
 | --------- | --------------------------------- |
-| Windows   | `%APDATA%\rhlm\rhlm.toml`                    |
-| Linux     | `~/.config/rhlm/rhlm.toml`                    |
+| Windows   | `%APPDATA%\rhrm\rhrm.toml`                    |
+| Linux     | `~/.config/rhrm/rhrm.toml`                    |
 
 包含以下设置：
 - 浮动窗口预设位置、尺寸和透明度。

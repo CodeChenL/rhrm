@@ -93,8 +93,8 @@ Configuration is stored in TOML format at:
 
 | OS      | Path                                          |
 | ------- | --------------------------------- |
-| Windows | `%APDATA%\rhlm\rhlm.toml`                    |
-| Linux   | `~/.config/rhlm/rhlm.toml`                    |
+| Windows | `%APPDATA%\rhrm\rhrm.toml`                    |
+| Linux   | `~/.config/rhrm/rhrm.toml`                    |
 
 Settings include:
 - Float window position preset, size, and opacity.

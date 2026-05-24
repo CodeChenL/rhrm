@@ -50,5 +50,5 @@ fn config_path() -> PathBuf {
             })
         })
         .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("rhlm").join("rhlm.toml")
+    base.join("rhrm").join("rhrm.toml")
 }
