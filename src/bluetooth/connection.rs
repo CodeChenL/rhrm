@@ -59,14 +59,21 @@ pub(crate) async fn connect_and_monitor_hr(addr: String, state: AppState) -> App
             log::info!("Scanning for device {}...", addr);
             state.set_error_message("Scanning...");
             let mut scan = adapter
-                .scan(&[])
+                .discover_devices(&[])
                 .await
                 .map_err(bluetooth_error)?;
             let mut found_device = None;
-            while let Some(discovered) = scan.next().await {
-                if format!("{:?}", discovered.device.id()) == addr {
-                    found_device = Some(discovered.device);
-                    break;
+            while let Some(result) = scan.next().await {
+                match result {
+                    Ok(device) => {
+                        if format!("{:?}", device.id()) == addr {
+                            found_device = Some(device);
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        log::debug!("Scan device error: {}", err);
+                    }
                 }
             }
             found_device.ok_or(AppError::ScanTimeout)?
@@ -76,7 +83,7 @@ pub(crate) async fn connect_and_monitor_hr(addr: String, state: AppState) -> App
     log::info!("Connecting to {}...", addr);
     state.set_error_message("Connecting...");
 
-    if !device.is_connected() {
+    if !device.is_connected().await {
         adapter
             .connect_device(&device)
             .await

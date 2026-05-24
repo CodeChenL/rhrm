@@ -8,6 +8,8 @@ use crate::error::{AppError, AppResult};
 
 use super::{bluetooth_error, HRS_UUID};
 
+const DEVICE_PROP_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
     let adapter = Adapter::default()
         .await
@@ -25,7 +27,7 @@ pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
         let addr = format!("{:?}", device.id());
         let now = Local::now().format("%H:%M:%S").to_string();
         state.upsert_device(DeviceInfo {
-            name: device.name().unwrap_or_else(|| "Unknown".to_string()),
+            name: device.name().unwrap_or_else(|_| "Unknown".to_string()),
             addr,
             rssi: 0,
             heart_rate: None,
@@ -38,7 +40,7 @@ pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
         log::debug!("Starting scan...");
         state.set_error_message("Scanning...");
 
-        let mut scan = match adapter.scan(&[]).await {
+        let mut scan = match adapter.discover_devices(&[HRS_UUID]).await {
             Ok(scan) => scan,
             Err(error) => {
                 log::warn!("Scan error: {}", error);
@@ -50,26 +52,35 @@ pub(crate) async fn run_bluetooth_scan(state: AppState) -> AppResult<()> {
 
         loop {
             tokio::select! {
-                result = async { scan.next().await } => {
+                result = scan.next() => {
                     match result {
-                        Some(discovered_device) => {
-                            let device = discovered_device.device;
-                            let name = device.name().unwrap_or_else(|| "Unknown".to_string());
-                            let is_connectable = discovered_device.adv_data.is_connectable;
-                            if name == "Unknown" && !is_connectable {
-                                continue;
-                            }
+                        Some(Ok(device)) => {
+                            let name = match tokio::time::timeout(
+                                DEVICE_PROP_TIMEOUT,
+                                device.name_async(),
+                            ).await {
+                                Ok(Ok(n)) if !n.is_empty() => n,
+                                _ => continue,
+                            };
 
                             let addr = format!("{:?}", device.id());
                             let now = Local::now().format("%H:%M:%S").to_string();
+                            let rssi = tokio::time::timeout(DEVICE_PROP_TIMEOUT, device.rssi())
+                                .await
+                                .ok()
+                                .and_then(|r| r.ok())
+                                .unwrap_or(0);
                             state.upsert_device(DeviceInfo {
                                 name,
                                 addr,
-                                rssi: discovered_device.rssi.unwrap_or_default(),
+                                rssi,
                                 heart_rate: None,
                                 last_seen: now,
                                 connected: false,
                             });
+                        }
+                        Some(Err(error)) => {
+                            log::debug!("Device discovery error: {}", error);
                         }
                         None => {
                             log::debug!("Scan finished, restarting...");

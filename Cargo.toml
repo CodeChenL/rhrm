@@ -13,7 +13,7 @@ clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"
 
 # 蓝牙 - bluest
-bluest = "0.4"
+bluest = "0.6"
 
 # 异步
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "rt", "time"] }
