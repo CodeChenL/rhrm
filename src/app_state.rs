@@ -1,10 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SharedHeartRateSnapshot {
     pub heart_rate: Option<u16>,
     pub connecting: bool,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct HistorySnapshot {
+    pub values: Vec<u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -17,11 +24,16 @@ pub struct DeviceInfo {
     pub connected: bool,
 }
 
+const HISTORY_MAX_SECONDS: usize = 60;
+const HISTORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub struct SharedHrData {
     pub heart_rate: Arc<Mutex<Option<u16>>>,
     pub connecting: Arc<Mutex<bool>>,
     pub version: Arc<Mutex<u64>>,
+    pub hr_history: Arc<Mutex<VecDeque<u16>>>,
+    pub last_history_sample: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Default for SharedHrData {
@@ -30,6 +42,8 @@ impl Default for SharedHrData {
             heart_rate: Arc::new(Mutex::new(None)),
             connecting: Arc::new(Mutex::new(false)),
             version: Arc::new(Mutex::new(0)),
+            hr_history: Arc::new(Mutex::new(VecDeque::new())),
+            last_history_sample: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -125,12 +139,38 @@ impl AppState {
         *self.shared_data.heart_rate.lock().unwrap() = heart_rate;
         *self.shared_data.connecting.lock().unwrap() = connecting;
         *self.shared_data.version.lock().unwrap() += 1;
+
+        if let Some(hr) = heart_rate {
+            let now = Instant::now();
+            let mut last_sample = self.shared_data.last_history_sample.lock().unwrap();
+            let should_sample = last_sample
+                .map(|t| now.duration_since(t) >= HISTORY_SAMPLE_INTERVAL)
+                .unwrap_or(true);
+            if should_sample {
+                let mut history = self.shared_data.hr_history.lock().unwrap();
+                history.push_back(hr);
+                if history.len() > HISTORY_MAX_SECONDS {
+                    history.pop_front();
+                }
+                *last_sample = Some(now);
+            }
+        } else if !connecting {
+            self.shared_data.hr_history.lock().unwrap().clear();
+            *self.shared_data.last_history_sample.lock().unwrap() = None;
+        }
     }
 
     pub fn shared_snapshot(&self) -> SharedHeartRateSnapshot {
         SharedHeartRateSnapshot {
             heart_rate: *self.shared_data.heart_rate.lock().unwrap(),
             connecting: *self.shared_data.connecting.lock().unwrap(),
+            version: *self.shared_data.version.lock().unwrap(),
+        }
+    }
+
+    pub fn history_snapshot(&self) -> HistorySnapshot {
+        HistorySnapshot {
+            values: self.shared_data.hr_history.lock().unwrap().iter().copied().collect(),
         }
     }
 }

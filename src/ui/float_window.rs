@@ -1,14 +1,12 @@
 use eframe::egui;
-use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::app_state::AppState;
 use super::float_window_controller::FloatWindowLayout;
 
-const HISTORY_SECONDS: usize = 60;
-const HISTORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const FLOAT_WINDOW_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const HISTORY_MAX_POINTS: f32 = (HISTORY_SECONDS.saturating_sub(1)) as f32;
+const HISTORY_MAX_SECONDS: usize = 60;
+const HISTORY_MAX_POINTS: f32 = (HISTORY_MAX_SECONDS.saturating_sub(1)) as f32;
 const HISTORY_GRID_LINES: usize = 4;
 const ALERT_HEART_RATE_THRESHOLD: u16 = 120;
 const ALERT_FLASH_INTERVAL_SECONDS: f32 = 0.5;
@@ -21,9 +19,7 @@ pub struct FloatWindowApp {
     opacity: f32,
     last_applied_layout: Option<FloatWindowLayout>,
     last_applied_click_through: Option<bool>,
-    hr_history: VecDeque<u16>,
     last_plotted_heart_rate: Option<u16>,
-    last_history_sample_at: Option<Instant>,
 }
 
 impl FloatWindowApp {
@@ -36,14 +32,11 @@ impl FloatWindowApp {
             opacity,
             last_applied_layout: None,
             last_applied_click_through: None,
-            hr_history: VecDeque::with_capacity(HISTORY_SECONDS),
             last_plotted_heart_rate: None,
-            last_history_sample_at: None,
         }
     }
 
     fn sync_heart_rate(&mut self) {
-        let now = Instant::now();
         let snapshot = self.state.shared_snapshot();
         self.connecting = snapshot.connecting;
         self.heart_rate = snapshot.heart_rate;
@@ -52,23 +45,6 @@ impl FloatWindowApp {
             self.last_plotted_heart_rate = Some(heart_rate);
         } else if !snapshot.connecting {
             self.last_plotted_heart_rate = None;
-            self.hr_history.clear();
-            self.last_history_sample_at = None;
-        }
-
-        if let Some(heart_rate) = self.last_plotted_heart_rate {
-            let should_sample = self
-                .last_history_sample_at
-                .map(|last| now.duration_since(last) >= HISTORY_SAMPLE_INTERVAL)
-                .unwrap_or(true);
-
-            if should_sample {
-                self.hr_history.push_back(heart_rate);
-                if self.hr_history.len() > HISTORY_SECONDS {
-                    self.hr_history.pop_front();
-                }
-                self.last_history_sample_at = Some(now);
-            }
         }
     }
 
@@ -131,7 +107,7 @@ impl FloatWindowApp {
 
         let heart_rate = self.heart_rate;
         let connecting = self.connecting;
-        let hr_history = &self.hr_history;
+        let history = self.state.history_snapshot();
         ctx.request_repaint_after(FLOAT_WINDOW_REFRESH_INTERVAL);
 
         egui::CentralPanel::default()
@@ -176,19 +152,19 @@ impl FloatWindowApp {
                     egui::Color32::WHITE,
                 );
 
-                if hr_history.len() > 1 {
+                if history.values.len() > 1 {
                     let desired_size = egui::vec2(
                         panel_rect.width().max(0.0),
                         panel_rect.height().max(0.0),
                     );
                     let (wave_rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-                    let history_min = hr_history.iter().copied().min().unwrap_or(60) as f32;
-                    let history_max = hr_history.iter().copied().max().unwrap_or(100) as f32;
+                    let history_min = history.values.iter().copied().min().unwrap_or(60) as f32;
+                    let history_max = history.values.iter().copied().max().unwrap_or(100) as f32;
                     let hr_padding = 4.0;
                     let min_hr = (history_min - hr_padding).max(30.0);
                     let max_hr = (history_max + hr_padding).min(220.0).max(min_hr + 1.0);
                     let mut points = Vec::new();
-                    for (index, heart_rate) in hr_history.iter().enumerate() {
+                    for (index, heart_rate) in history.values.iter().enumerate() {
                         let x_ratio = index as f32 / HISTORY_MAX_POINTS;
                         let x = wave_rect.min.x + x_ratio * wave_rect.width();
                         let y = wave_rect.max.y
